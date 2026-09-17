@@ -17,6 +17,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
+import java.util.LinkedHashMap;
 
 /**
  * Reads a corpus of raw messages and puts transactions in the ledger.
@@ -37,18 +38,39 @@ public final class IngestService {
 
     public Stats ingestFile(Path corpus) throws IOException {
         List<RawMessage> messages = readCorpus(corpus);
-        int parsed = 0;
+        Map<String, NormalizedTxn> unique = new LinkedHashMap<>();
         int skipped = 0;
+
         for (RawMessage m : messages) {
             Optional<ParsedTxn> p = parsers.parse(m);
+
             if (p.isEmpty()) {
                 skipped++;
                 continue;
             }
-            store.save(toTransaction(p.get()));
-            parsed++;
+
+            NormalizedTxn txn = toTransaction(p.get());
+            String key = txn.accountLast4() + "|" + txn.occurredAt() + "|"
+                    + txn.direction() + "|" + txn.amount() + "|" + txn.merchant();
+
+            if (unique.containsKey(key)) {
+                NormalizedTxn old = unique.get(key);
+
+                List<String> ids = new ArrayList<>(old.sourceMessageIds());
+                ids.addAll(txn.sourceMessageIds());
+                ids.sort(String::compareTo);
+
+                txn = new NormalizedTxn(
+                        old.accountLast4(), old.occurredAt(), old.direction(),
+                        old.amount(), old.category(), old.merchant(), ids);
+            }
+
+            unique.put(key, txn);
         }
-        return new Stats(messages.size(), parsed, skipped);
+
+        unique.values().forEach(store::save);
+
+        return new Stats(messages.size(), unique.size(), skipped);
     }
 
     public static List<RawMessage> readCorpus(Path corpus) throws IOException {
