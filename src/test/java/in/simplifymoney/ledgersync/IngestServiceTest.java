@@ -38,4 +38,34 @@ class IngestServiceTest {
                 + ",\"device_id\":\"dev-test\""
                 + ",\"body\":\"" + body + "\"}";
     }
+    @Test
+    void mergesSameTransactionWithDifferentTimezones(@TempDir Path dir) throws Exception {
+        Path file = dir.resolve("corpus.jsonl");
+
+        String sms = "{\"message_id\":\"m-sms\",\"channel\":\"sms\","
+                + "\"sender\":\"AD-HDFCBK-S\","
+                + "\"received_at\":\"2026-07-19T00:20:00+05:30\","
+                + "\"device_id\":\"dev-test\","
+                + "\"body\":\"Rs 412.67 debited from a/c **4821 on 19-07-26 at 00:20 to UBER INDIA. Avl Bal: Rs.70,891.55.\"}";
+
+        String email = "{\"message_id\":\"m-email\",\"channel\":\"email\","
+                + "\"sender\":\"alerts@hdfcbank.net\","
+                + "\"received_at\":\"2026-07-18T18:50:00Z\","
+                + "\"device_id\":\"dev-test\","
+                + "\"body\":\"Date: Sat, 18 Jul 2026 18:50:00 +0000\\n"
+                + "Subject: Transaction alert on your account\\n\\n"
+                + "Dear Customer,\\n\\n"
+                + "Your account ending 4821 has been debited with INR 412.67.\\n"
+                + "Merchant / Remarks: UBER INDIA\\n"
+                + "Transaction reference: 1234567890\\n\\n"
+                + "This is a system generated email.\"}";
+
+        Files.writeString(file, sms + "\n" + email);
+
+        InMemoryLedgerStore store = new InMemoryLedgerStore();
+        new IngestService(new Parsers(), store).ingestFile(file);
+
+        assertEquals(1, store.count());
+        assertEquals(2, store.all().get(0).sourceMessageIds().size());
+    }
 }

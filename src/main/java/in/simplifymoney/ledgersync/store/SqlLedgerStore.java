@@ -3,6 +3,7 @@ package in.simplifymoney.ledgersync.store;
 import in.simplifymoney.ledgersync.model.Category;
 import in.simplifymoney.ledgersync.model.Direction;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
+import in.simplifymoney.ledgersync.model.BalanceEvidence;
 import java.math.BigDecimal;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -137,6 +138,50 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
         } catch (SQLException e) {
             throw new IllegalStateException("could not total the ledger", e);
         }
+    }
+
+    public void saveBalanceEvidence(BalanceEvidence e) {
+        try (PreparedStatement ps = conn.prepareStatement(
+                "INSERT INTO balance_evidence(account_last4, occurred_at,"
+                        + " stated_balance, source_message_id)"
+                        + " SELECT ?,?,?,? WHERE NOT EXISTS"
+                        + " (SELECT 1 FROM balance_evidence WHERE source_message_id = ?)")) {
+
+            ps.setString(1, e.accountLast4());
+            ps.setString(2, e.occurredAt().toString());
+            ps.setBigDecimal(3, e.statedBalance());
+            ps.setString(4, e.sourceMessageId());
+            ps.setString(5, e.sourceMessageId());
+
+            ps.executeUpdate();
+        } catch (SQLException ex) {
+            throw new IllegalStateException("could not save balance evidence", ex);
+        }
+    }
+
+    public List<BalanceEvidence> allBalanceEvidence() {
+        List<BalanceEvidence> out = new ArrayList<>();
+
+        try (Statement st = conn.createStatement();
+             ResultSet rs = st.executeQuery(
+                     "SELECT account_last4, occurred_at, stated_balance,"
+                             + " source_message_id FROM balance_evidence"
+                             + " ORDER BY occurred_at")) {
+
+            while (rs.next()) {
+                out.add(new BalanceEvidence(
+                        rs.getString(1),
+                        OffsetDateTime.parse(rs.getString(2)),
+                        rs.getBigDecimal(3).setScale(2),
+                        rs.getString(4)
+                ));
+            }
+
+        } catch (SQLException ex) {
+            throw new IllegalStateException("could not read balance evidence", ex);
+        }
+
+        return out;
     }
 
     @Override

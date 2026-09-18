@@ -38,6 +38,7 @@ public final class SelfCheck {
         Map<Category, BigDecimal> cats = in.simplifymoney.ledgersync.report.Reports
                 .byCategory(ledger);
         System.out.println("\nBY CATEGORY");
+
         cats.forEach((c, v) -> System.out.printf("  %-9s %12s%n", c, v.toPlainString()));
 
         Map<String, Object> want = Json.parseObject(Files.readString(totals));
@@ -72,4 +73,5 @@ public final class SelfCheck {
         }
         System.out.println("\nThis is the starting point, not the finish line.");
     }
+
 }

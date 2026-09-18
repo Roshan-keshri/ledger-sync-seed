@@ -1,7 +1,7 @@
 package in.simplifymoney.ledgersync;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
-
+import static org.junit.jupiter.api.Assertions.assertNull;
 import in.simplifymoney.ledgersync.parse.Amounts;
 import java.math.BigDecimal;
 import org.junit.jupiter.api.Test;
@@ -47,6 +47,13 @@ class AmountsTest {
                 new BigDecimal("5.00"),
                 Amounts.first("Rs.5 debited from A/c XX4821 towards UPI/WATER CAN. Avl Bal: Rs.92,213.10.")
         );
+    }
+
+    @Test
+    void doesNotTreatCardLimitAsBalance() {
+        assertNull(Amounts.statedBalance(
+                "Rs 1,249.99 spent on HDFC Bank Card x3310 at BLINKIT. "
+                        + "Avl Limit: Rs.196,250.03."));
     }
 
     @Test

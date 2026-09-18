@@ -3,19 +3,23 @@ package in.simplifymoney.ledgersync.report;
 import in.simplifymoney.ledgersync.model.Category;
 import in.simplifymoney.ledgersync.model.Direction;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
+import in.simplifymoney.ledgersync.model.BalanceEvidence;
 import java.math.BigDecimal;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeSet;
+import java.util.ArrayList;
+import java.util.TreeMap;
+import java.util.stream.Collectors;
 
 /**
  * The two reports the assignment asks for.
  *
  * summary() below is a first cut: it adds up what is in the ledger. It does not
  * know that a transfer is not spending, and it does not roll micro spends up.
- *
- * reconciliation() has not been written at all.
+ /**
+ * Builds ledger, summary and reconciliation reports.
  */
 public final class Reports {
 
@@ -91,8 +95,64 @@ public final class Reports {
         return doc;
     }
 
-    public static Map<String, Object> reconciliation(List<NormalizedTxn> ledger) {
-        throw new UnsupportedOperationException("reconciliation is not implemented");
+    public static Map<String, Object> reconciliation(
+            List<NormalizedTxn> ledger,
+            List<BalanceEvidence> evidence) {
+
+        List<Object> discrepancies = new ArrayList<>();
+
+        for (String account : new TreeSet<>(
+                evidence.stream().map(BalanceEvidence::accountLast4).toList())) {
+
+            var balances = evidence.stream()
+                    .filter(e -> e.accountLast4().equals(account))
+                    .collect(Collectors.toMap(
+                            BalanceEvidence::occurredAt,
+                            e -> e,
+                            (a, b) -> a,
+                            TreeMap::new));
+
+            BalanceEvidence previous = null;
+
+            for (BalanceEvidence current : balances.values()) {
+                if (previous != null) {
+                    BigDecimal expected = previous.statedBalance();
+
+                    for (NormalizedTxn t : ledger) {
+                        if (!t.accountLast4().equals(account)) continue;
+
+                        if (t.occurredAt().isAfter(previous.occurredAt())
+                                && !t.occurredAt().isAfter(current.occurredAt())) {
+
+                            expected = t.direction() == Direction.DEBIT
+                                    ? expected.subtract(t.amount())
+                                    : expected.add(t.amount());
+                        }
+                    }
+
+                    BigDecimal difference =
+                            expected.subtract(current.statedBalance());
+
+                    if (difference.compareTo(BigDecimal.ZERO) != 0) {
+                        Map<String, Object> d = new LinkedHashMap<>();
+                        d.put("account_last4", account);
+                        d.put("occurred_at", current.occurredAt().toString());
+                        d.put("amount", difference.abs().toPlainString());
+                        d.put("note", difference.signum() > 0
+                                ? "unexplained debit"
+                                : "unexplained credit");
+
+                        discrepancies.add(d);
+                    }
+                }
+
+                previous = current;
+            }
+        }
+
+        Map<String, Object> doc = new LinkedHashMap<>();
+        doc.put("discrepancies", discrepancies);
+        return doc;
     }
 
     public static Map<Category, BigDecimal> byCategory(List<NormalizedTxn> ledger) {

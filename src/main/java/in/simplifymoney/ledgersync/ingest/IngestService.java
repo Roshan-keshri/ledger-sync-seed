@@ -7,6 +7,8 @@ import in.simplifymoney.ledgersync.model.RawMessage;
 import in.simplifymoney.ledgersync.parse.ParsedTxn;
 import in.simplifymoney.ledgersync.parse.Parsers;
 import in.simplifymoney.ledgersync.store.LedgerStore;
+import in.simplifymoney.ledgersync.model.BalanceEvidence;
+import in.simplifymoney.ledgersync.store.SqlLedgerStore;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -44,9 +46,19 @@ public final class IngestService {
                 skipped++;
                 continue;
             }
+            ParsedTxn parsed = p.get();
 
-            NormalizedTxn txn = toTransaction(p.get());
-            String key = txn.accountLast4() + "|" + txn.occurredAt() + "|"
+            if (parsed.statedBalance() != null && store instanceof SqlLedgerStore sqlStore) {
+                sqlStore.saveBalanceEvidence(new BalanceEvidence(
+                        parsed.accountLast4(),
+                        parsed.occurredAt(),
+                        parsed.statedBalance(),
+                        parsed.sourceMessageId()
+                ));
+            }
+
+            NormalizedTxn txn = toTransaction(parsed);
+            String key = txn.accountLast4() + "|" + txn.occurredAt().toInstant() + "|"
                     + txn.direction() + "|" + txn.amount() + "|" + txn.merchant();
 
             if (unique.containsKey(key)) {
