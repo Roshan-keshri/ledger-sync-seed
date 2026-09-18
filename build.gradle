@@ -35,3 +35,10 @@ tasks.register('selfCheck', JavaExec) {
     mainClass = 'in.simplifymoney.ledgersync.SelfCheck'
     classpath = sourceSets.main.runtimeClasspath
 }
+
+tasks.register('benchmark', JavaExec) {
+    group = 'verification'
+    description = 'Runs MongoDB benchmark with 100,000 transactions'
+    classpath = sourceSets.main.runtimeClasspath
+    mainClass = 'in.simplifymoney.ledgersync.Benchmark'
+}

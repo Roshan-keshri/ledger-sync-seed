@@ -99,15 +99,22 @@ public final class MongoDocumentStore implements DocumentStore, AutoCloseable {
     }
     @Override
     public Map<Category, BigDecimal> categoryTotals(String accountLast4) {
-        Map<Category, BigDecimal> totals = new java.util.EnumMap<>(Category.class);
+        Map<Category, BigDecimal> totals =
+                new java.util.EnumMap<>(Category.class);
 
-        collection.find(Filters.eq("account_last4", accountLast4))
-                .forEach(d -> {
-                    Category category = Category.valueOf(d.getString("category"));
-                    BigDecimal amount = new BigDecimal(d.getString("amount"));
-
-                    totals.merge(category, amount, BigDecimal::add);
-                });
+        collection.aggregate(List.of(
+                new Document("$match",
+                        new Document("account_last4", accountLast4)),
+                new Document("$group",
+                        new Document("_id", "$category")
+                                .append("total",
+                                        new Document("$sum",
+                                                new Document("$toDecimal", "$amount"))))
+        )).forEach(d -> totals.put(
+                Category.valueOf(d.getString("_id")),
+                d.get("total", org.bson.types.Decimal128.class)
+                        .bigDecimalValue()
+        ));
 
         return totals;
     }
@@ -138,6 +145,10 @@ public final class MongoDocumentStore implements DocumentStore, AutoCloseable {
         List<NormalizedTxn> out = new ArrayList<>();
         collection.find().forEach(d -> out.add(toTxn(d)));
         return out;
+    }
+
+    public MongoCollection<Document> collection() {
+        return collection;
     }
 
     @Override
