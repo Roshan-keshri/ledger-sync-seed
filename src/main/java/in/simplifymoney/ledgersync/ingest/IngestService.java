@@ -2,7 +2,6 @@ package in.simplifymoney.ledgersync.ingest;
 
 import in.simplifymoney.ledgersync.json.Json;
 import in.simplifymoney.ledgersync.model.Category;
-import in.simplifymoney.ledgersync.model.Direction;
 import in.simplifymoney.ledgersync.model.NormalizedTxn;
 import in.simplifymoney.ledgersync.model.RawMessage;
 import in.simplifymoney.ledgersync.parse.ParsedTxn;
@@ -18,13 +17,10 @@ import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Stream;
 import java.util.LinkedHashMap;
-
+import java.time.Duration;
 /**
- * Reads a corpus of raw messages and puts transactions in the ledger.
- *
- * This is the naive version. It parses each message on its own and saves
- * whatever comes back. It does not ask whether two messages describe the same
- * transaction, and it decides the category from the direction alone.
+ * Reads raw messages, parses transactions and merges duplicate
+ * messages that represent the same transaction.
  */
 public final class IngestService {
 
@@ -68,7 +64,21 @@ public final class IngestService {
             unique.put(key, txn);
         }
 
-        unique.values().forEach(store::save);
+        List<NormalizedTxn> txns = new ArrayList<>(unique.values());
+
+        for (int i = 0; i < txns.size(); i++) {
+            for (int j = i + 1; j < txns.size(); j++) {
+                NormalizedTxn a = txns.get(i);
+                NormalizedTxn b = txns.get(j);
+
+                if (isTransferPair(a, b)) {
+                    txns.set(i, asTransfer(a));
+                    txns.set(j, asTransfer(b));
+                }
+            }
+        }
+
+        txns.forEach(store::save);
 
         return new Stats(messages.size(), unique.size(), skipped);
     }
@@ -91,9 +101,23 @@ public final class IngestService {
     }
 
     private NormalizedTxn toTransaction(ParsedTxn p) {
-        Category c = p.direction() == Direction.DEBIT ? Category.SPEND : Category.INCOME;
+        Category c = Categorizer.category(p);
+
         return new NormalizedTxn(p.accountLast4(), p.occurredAt(), p.direction(),
                 p.amount(), c, p.merchant(), List.of(p.sourceMessageId()));
+    }
+    private boolean isTransferPair(NormalizedTxn a, NormalizedTxn b) {
+        return !a.accountLast4().equals(b.accountLast4())
+                && a.direction() != b.direction()
+                && a.amount().equals(b.amount())
+                && a.merchant().equals(b.merchant())
+                && Math.abs(Duration.between(a.occurredAt(), b.occurredAt()).toMinutes()) <= 2;
+    }
+
+    private NormalizedTxn asTransfer(NormalizedTxn t) {
+        return new NormalizedTxn(
+                t.accountLast4(), t.occurredAt(), t.direction(),
+                t.amount(), Category.TRANSFER, t.merchant(), t.sourceMessageIds());
     }
 
     public record Stats(int messagesRead, int transactionsWritten, int messagesSkipped) {}
