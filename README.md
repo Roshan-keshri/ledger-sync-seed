@@ -677,7 +677,7 @@ difference.
 
 # AI Disclosure
 
-I used **ChatGPT** while working on this assignment.
+I used **ChatGPT & Gemini** while working on this assignment.
 
 I used it mainly for:
 
