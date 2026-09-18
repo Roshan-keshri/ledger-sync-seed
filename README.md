@@ -1,9 +1,11 @@
 # ledger-sync
 
-Simplify Money **Software Engineering Intern (Backend, Java)** take-home implementation.
+My implementation of the Simplify Money backend take-home.
 
-This service reads bank SMS/email messages and converts them into a normalized,
-deduplicated ledger that can be used to understand where a user's money went.
+The service reads bank SMS/email messages, turns them into normalized
+transactions, removes duplicate evidence, identifies transfers and micro spends,
+reconciles the ledger against bank balance evidence, and supports migration from
+the existing SQL ledger to MongoDB.
 
 ---
 
@@ -14,19 +16,15 @@ deduplicated ledger that can be used to understand where a user's money went.
 - JDK 21
 - Docker with Docker Compose
 
-### Run verification
+Run:
 
 ```bash
 ./verify.sh
 ```
 
-The verification script:
+This starts MongoDB, runs the test suite, and runs the ledger self-check.
 
-1. Starts MongoDB using Docker Compose.
-2. Runs the automated test suite.
-3. Runs the ledger self-check against the supplied corpus.
-
-The individual commands are:
+Individual commands:
 
 ```bash
 docker compose up -d
@@ -34,60 +32,35 @@ docker compose up -d
 ./gradlew selfCheck
 ```
 
-On Windows PowerShell, the Gradle commands can be run as:
+On Windows:
 
 ```powershell
+docker compose up -d
 .\gradlew.bat test
 .\gradlew.bat selfCheck
 ```
 
-MongoDB runs locally on port `27017`.
+MongoDB runs on:
 
----
+```text
+localhost:27017
+```
 
-## What the Service Does
-
-The input is:
+The main corpus is:
 
 ```text
 fixtures/corpus-a.jsonl
 ```
 
-Each line contains one SMS or email uploaded from the user's device.
-
-The service parses these messages and produces normalized financial
-transactions while handling:
-
-- multiple bank message formats
-- SMS and email sources
-- duplicate messages
-- the same transaction appearing through different channels
-- micro transactions
-- transfers between the user's own accounts
-- balance evidence
-- reconciliation discrepancies
-- SQL persistence
-- migration from SQL to MongoDB
-
-The reporting pipeline produces:
-
-```text
-ledger.json
-summary.json
-reconciliation.json
-```
-
 ---
 
-## Architecture
-
-The ingestion flow is:
+# How the Pipeline Works
 
 ```text
 Raw SMS / Email
       |
       v
-Message Parser
+Bank-specific parsers
       |
       v
 ParsedTxn
@@ -115,294 +88,360 @@ SQL Ledger
             Consistency Checker
 ```
 
-Every real transaction is represented once while all source message IDs that
-provide evidence for the transaction are retained for traceability.
+A message is evidence for a transaction, but a message is not necessarily a
+transaction.
+
+The same transaction can appear in an SMS, an email, or a repeated bank
+notification. The goal of ingestion is therefore to create one ledger entry per
+real transaction while preserving every message ID that supports it.
 
 ---
 
-## Transaction Model
+# Corpus Result
 
-Each normalized transaction contains:
+Running the self-check currently gives:
 
 ```text
-account_last4
-occurred_at
-direction
-amount
-category
-merchant
+INGEST
+  messages read          522
+  transactions written   256
+  messages skipped        43
+
+BY CATEGORY
+  SPEND        142567.64
+  INCOME       142791.16
+  MICRO          4443.85
+  TRANSFER      62000.00
+```
+
+Against the supplied checkpoint:
+
+```text
+transactions expected 257, produced 256
+
+4821:
+  transactions          145 (expected 146)
+  ledger balance   48626.34
+  bank balance     41126.34
+  difference        7500.00
+
+9075:
+  transactions           91 (expected 91)
+  ledger balance   51210.63
+  bank balance     51210.63
+  difference           0.00
+```
+
+I left these differences visible rather than changing the ledger simply to make
+the checkpoint match. The reasons are explained below.
+
+---
+
+# Decision Log
+
+## 1. Deduplicate using the transaction instant, not timestamp text
+
+My first duplicate identity used the parsed transaction timestamp. While
+investigating why my result did not agree with the checkpoint, I found a
+₹412.67 UBER transaction represented by both SMS and email.
+
+One timestamp used an India offset and the other used UTC. The strings were
+different, but:
+
+```java
+occurredAt().toInstant()
+```
+
+was the same.
+
+I changed duplicate identity to compare the instant.
+
+I rejected counting the SMS and email as two transactions because that would
+move my result closer to the expected 257 while knowingly putting the same real
+transaction into the ledger twice.
+
+With more time I would build a larger set of cross-channel duplicate fixtures
+from additional banks.
+
+---
+
+## 2. Keep all message IDs when transactions are deduplicated
+
+Initially it would have been simpler to keep the first message and ignore later
+duplicates.
+
+I rejected that because the later message is still useful evidence.
+
+The final transaction therefore keeps all supporting:
+
+```text
 source_message_ids
 ```
 
-`occurred_at` represents when the bank says the transaction occurred rather
-than when the message was received.
-
-Amounts are represented using `BigDecimal` and remain positive. The transaction
-direction (`DEBIT` or `CREDIT`) carries the sign.
+This also became useful during SQL-to-Mongo migration and consistency checking,
+because a transaction can be traced back to every message that produced it.
 
 ---
 
-## Categories
+## 3. Do not treat `Avl Limit` as balance evidence
 
-Every transaction belongs to exactly one of four categories.
+While working on reconciliation I initially allowed several "available" values
+from bank messages to be interpreted as balances.
 
-| Category | Meaning |
-|---|---|
-| `SPEND` | Money left the user and is ordinary spending |
-| `INCOME` | Money arrived and belongs to the user |
-| `MICRO` | UPI debit of ₹100 or less |
-| `TRANSFER` | Money moved between the user's own accounts |
+The corpus changed my mind.
 
-`MICRO` transactions are not included in normal `SPEND` totals.
-
-Similarly, `TRANSFER` transactions are excluded from both spending and income
-because counting them as either would inflate the user's financial activity.
-
----
-
-## Parsing
-
-The corpus contains multiple message formats.
-
-The implementation supports:
-
-- HDFC SMS
-- ICICI SMS
-- alternate ICICI SMS formats
-- transaction emails
-
-Parsing extracts information such as:
+HDFC card messages contain values such as:
 
 ```text
-account
-transaction time
-direction
-amount
-merchant
-stated balance
-source message ID
+Avl Limit: Rs.196,250.03
 ```
 
-The parser uses the transaction time contained in the bank message rather than
-the message delivery time whenever transaction time is available.
+That is a credit-card limit, not the balance of account `3310`.
+
+Using it as balance evidence created reconciliation differences that were not
+real ledger differences.
+
+I removed `Avl Limit` from balance extraction.
+
+With more time I would model credit-card limits separately instead of simply
+excluding them from bank-account reconciliation.
 
 ---
 
-## Deduplication
+## 4. Report the ₹7,500 difference instead of creating a transaction
 
-One bank transaction does not necessarily correspond to one message.
+Account `4821` does not fully reconcile.
 
-The same transaction may appear:
+The ledger gives:
 
-- in an SMS
-- in an email
-- in repeated messages
+```text
+48626.34
+```
 
-Transactions are therefore deduplicated using their transaction identity rather
-than only their message ID.
+while the bank evidence gives:
 
-The identity uses:
+```text
+41126.34
+```
+
+The difference is:
+
+```text
+7500.00
+```
+
+I traced the point where this difference appears to balance evidence on
+2026-07-29, but I could not find a ₹7,500 transaction in the supplied corpus
+that explains it.
+
+One option would have been to create an inferred debit so that the final
+balance matched.
+
+I rejected that because the assignment's most important ledger property is that
+false transactions must not be created.
+
+The ₹7,500 therefore remains an `unexplained debit` in reconciliation.
+
+With more time I would want another source of evidence, such as the account
+statement around that date, before deciding what caused it.
+
+---
+
+## 5. Detect transfers from both sides of the movement
+
+Direction alone originally made every debit spending and every credit income.
+
+The corpus contains movements where the same amount leaves one user account and
+arrives in another shortly afterwards.
+
+Counting those legs as spend and income inflates both numbers.
+
+I pair transactions when they have opposite directions, different user
+accounts, matching amount/merchant information, and occur within the transfer
+matching window.
+
+Both legs are then classified as:
+
+```text
+TRANSFER
+```
+
+I rejected merchant-name-only transfer detection because merchant text by itself
+was not enough evidence that the money remained with the user.
+
+With more time I would make the matching window/configuration explicit and test
+it against more transfer formats.
+
+---
+
+## 6. Treat small UPI debits separately from normal spending
+
+The reporting contract requires a UPI debit of ₹100 or less to be `MICRO`.
+
+I therefore classify these before ordinary debit spending.
+
+They contribute to:
+
+```text
+micro_count
+micro_total
+```
+
+but are not included in normal `SPEND`.
+
+I kept this as categorization rather than changing the transaction amount or
+dropping the transaction, because the transaction is still real ledger
+activity.
+
+---
+
+## 7. Make persistent SQL ingestion idempotent
+
+In-memory deduplication solved duplicates within one ingestion run, but it did
+not solve this case:
+
+```text
+run ingestion
+run ingestion again
+```
+
+The existing SQL table also did not give me a uniqueness guarantee I could rely
+on.
+
+I therefore check canonical transaction identity against existing SQL data and
+merge source evidence when the transaction already exists.
+
+I rejected using message ID as the SQL uniqueness rule because the corpus had
+already shown that several message IDs can represent one transaction.
+
+---
+
+## 8. Use MongoDB and deterministic document identity
+
+The assignment allowed DynamoDB or MongoDB.
+
+I chose MongoDB because I could run the actual document store locally through
+Docker Compose and measure its real query execution plans without requiring
+cloud credentials.
+
+Each document receives a deterministic `_id` based on transaction identity.
+
+That means rerunning the migration writes the same logical document instead of
+creating another one.
+
+I considered random document IDs, but rejected them because retries after a
+partial backfill would then need another uniqueness mechanism to avoid duplicate
+documents.
+
+---
+
+## 9. Deduplicate dirty SQL rows during backfill
+
+While testing migration I found that the SQL source can contain duplicate
+transaction rows with different legacy source message IDs.
+
+Simply skipping the later SQL row removed valid traceability.
+
+I changed the backfill to group rows by canonical transaction identity and merge
+their message IDs before saving to MongoDB.
+
+This means repeated or partially completed backfills converge on the same
+logical document-store state.
+
+---
+
+## 10. Check actual fields, not only store counts
+
+A consistency checker that says:
+
+```text
+SQL count = 256
+Mongo count = 256
+```
+
+does not prove that the stores agree.
+
+A Mongo document could have the wrong amount or merchant and the counts would
+still match.
+
+The checker therefore locates transactions through source message IDs and
+compares fields including:
 
 ```text
 account
 transaction instant
 direction
 amount
+category
 merchant
 ```
 
-Timestamp comparisons use the underlying instant.
+It also checks for unexpected Mongo transactions.
 
-This is important because two messages can contain different timezone offsets
-while still describing exactly the same point in time.
-
-When duplicate evidence is found, the transaction remains one ledger entry and
-the source message IDs are combined.
+Tests deliberately alter document-store data and verify that the checker reports
+the difference.
 
 ---
 
-## Transfer Detection
+# What the Data Made Me Decide
 
-Transfers between the user's own accounts should not appear as spending or
-income.
+These were choices I could not make correctly from the task description alone.
 
-The implementation looks for transactions that have:
+| What I saw in the corpus | What I chose | What I would do with more time |
+|---|---|---|
+| The ₹412.67 UBER transaction appeared in SMS and email with different timezone offsets | Compare transaction identity using the underlying instant and preserve both message IDs | Add more cross-bank/cross-channel duplicate fixtures |
+| `Rs.5` appeared before `Avl Bal: Rs.92,213.10` | Allow whole-rupee transaction amounts instead of requiring two decimal places | Move more parsing rules into explicit bank-format parsers instead of relying on shared regexes |
+| HDFC card messages contained `Avl Limit` | Exclude credit-card limit from account balance evidence | Model credit-card state separately |
+| Equal opposite movements appeared across the user's accounts | Pair the legs and classify them as `TRANSFER` | Validate the transfer matching window against a larger dataset |
+| Account `4821` had a ₹7,500 balance movement with no transaction explaining it | Report an unexplained reconciliation debit | Compare against bank statement data before assigning a cause |
+| Dirty SQL contained duplicate transaction rows with different source IDs | Merge evidence during backfill instead of dropping later rows | Move canonical uniqueness closer to the database schema if migration constraints allow |
+| Re-running ingestion could write the same transaction again | Make persistence idempotent, not just in-memory ingestion | Add stronger concurrency tests for overlapping ingestion jobs |
 
-- different user accounts
-- opposite directions
-- the same amount
-- matching merchant information
-- timestamps within the transfer matching window
-
-Matching legs are classified as:
-
-```text
-TRANSFER
-```
-
-This prevents internal account movements from artificially increasing spending
-and income totals.
+The main principle I followed was that matching the supplied totals is not more
+important than preserving transaction truth. When the evidence and checkpoint
+disagreed, I kept the disagreement visible.
 
 ---
 
-## Corpus Result
+# Incident INC-2026-09-11
 
-Processing:
+The incident reported a ₹5 water-can purchase being recorded as ₹92,213.10.
 
-```text
-fixtures/corpus-a.jsonl
-```
-
-produces:
-
-```text
-messages read         522
-unique transactions   256
-messages skipped       43
-```
-
-Category totals are:
-
-```text
-SPEND       142567.64
-INCOME      142791.16
-MICRO         4443.85
-TRANSFER     62000.00
-```
-
----
-
-## Checkpoint Difference
-
-The supplied checkpoint expects:
-
-```text
-257 transactions
-```
-
-while the implementation produces:
-
-```text
-256 unique transactions
-```
-
-This difference is intentional and documented rather than hidden.
-
-A ₹412.67 UBER transaction appears through both SMS and email. The timestamps
-use different timezone offsets but represent the same instant.
-
-These messages therefore provide multiple pieces of evidence for one real
-transaction.
-
-Counting both as separate transactions would violate the requirement that each
-real transaction appears exactly once.
-
-For this reason, the implementation keeps the deduplicated count of 256 instead
-of manufacturing or retaining another transaction simply to make the checkpoint
-equal 257.
-
----
-
-## Reconciliation
-
-Balance observations from bank messages are stored separately as evidence and
-used to determine whether ledger activity explains observed account balances.
-
-### Account 9075
-
-```text
-Calculated closing balance: 51210.63
-Bank closing balance:       51210.63
-Difference:                     0.00
-```
-
-The account reconciles exactly.
-
-### Account 4821
-
-```text
-Calculated closing balance: 48626.34
-Bank closing balance:       41126.34
-Difference:                  7500.00
-```
-
-The balance evidence shows an unexplained ₹7,500 debit appearing on
-2026-07-29.
-
-The supplied corpus does not contain a transaction that can honestly explain
-this movement.
-
-The implementation therefore reports:
-
-```text
-7500.00 unexplained debit
-```
-
-in reconciliation rather than creating a synthetic transaction to force the
-balances to match.
-
-This follows the requirement that reconciliation must be honest and that false
-transactions must never be introduced.
-
----
-
-## Incident INC-2026-09-11
-
-The reported incident showed a ₹5 water-can purchase appearing as:
-
-```text
-₹92,213.10
-```
-
-### Root Cause
-
-The original amount regex required exactly two decimal places.
-
-For a message shaped like:
+The message was shaped like:
 
 ```text
 Rs.5 debited ... Avl Bal: Rs.92,213.10
 ```
 
-the parser rejected:
+The original amount pattern required exactly two decimal places.
+
+That meant it skipped:
 
 ```text
 Rs.5
 ```
 
-because it did not contain two decimal places.
-
-It continued searching the message and incorrectly matched:
+and continued until it found:
 
 ```text
 Rs.92,213.10
 ```
 
-which was the available balance.
+which was the account balance.
 
-### Fix
+The amount parser now accepts both whole-rupee and two-decimal transaction
+amounts.
 
-The amount parser was changed to accept both:
+A regression test covers the incident message shape.
 
-```text
-Rs.5
-Rs.5.00
-```
-
-while still taking the first valid transaction amount.
-
-A regression test covers the exact incident message shape.
-
-### Blast Radius
-
-Corpus investigation found:
+My corpus investigation found:
 
 ```text
 38 affected messages
 24 distinct message bodies
 ```
 
-The detailed incident investigation is available at:
+The complete investigation is documented in:
 
 ```text
 incident/INC-2026-09-11-response.md
@@ -410,44 +449,56 @@ incident/INC-2026-09-11-response.md
 
 ---
 
-## SQL Ledger
+# Reconciliation
 
-The existing SQL ledger remains the source used for migration.
+Balance values found in bank messages are retained as balance evidence.
 
-Persistent ingestion is idempotent.
+The reconciliation logic walks that evidence and checks whether known ledger
+activity explains the observed movement.
 
-Before inserting a transaction, canonical transaction identity is checked so
-that rerunning ingestion or processing overlapping input does not create
-additional ledger transactions.
+For account `9075`:
 
-When duplicate transaction evidence is found, source message IDs are combined
-rather than creating another transaction.
+```text
+ledger closing balance   51210.63
+bank closing balance     51210.63
+difference                   0.00
+```
+
+For account `4821`:
+
+```text
+ledger closing balance   48626.34
+bank closing balance     41126.34
+difference                7500.00
+```
+
+The ₹7,500 movement is reported rather than converted into a synthetic
+transaction.
 
 ---
 
-# Document Store Migration
+# Document Store
 
 ## Why MongoDB
 
-MongoDB 8 was selected as the document store.
+I used MongoDB 8 for the document-store migration.
 
-It was chosen because it:
+It gives this project:
 
-- runs locally through Docker Compose
-- provides native document storage
-- supports compound indexes
-- supports aggregation
-- supports deterministic upserts
-- provides query execution statistics
-- is straightforward to reproduce locally
+- local Docker Compose startup
+- document storage
+- compound indexes
+- aggregation
+- upserts
+- query execution statistics
 
-The database starts with:
+Start it with:
 
 ```bash
 docker compose up -d
 ```
 
-The application uses:
+The application connects to:
 
 ```text
 mongodb://localhost:27017
@@ -455,15 +506,13 @@ mongodb://localhost:27017
 
 ---
 
-## MongoDB Document Model
+## Document Model
 
-Each transaction is represented as one document.
-
-Conceptually:
+A transaction is stored as one MongoDB document:
 
 ```json
 {
-  "_id": "deterministic-transaction-identity",
+  "_id": "canonical-transaction-identity",
   "account_last4": "4821",
   "occurred_at": "2026-07-04T20:24:00Z",
   "direction": "DEBIT",
@@ -477,94 +526,95 @@ Conceptually:
 }
 ```
 
-The deterministic `_id` is based on transaction identity.
+The deterministic `_id` is built from the transaction identity:
 
-This allows repeated writes of the same transaction to converge on the same
-document instead of creating duplicates.
+```text
+account
+transaction instant
+direction
+amount
+merchant
+```
+
+The source IDs remain an array because several messages can support the same
+transaction.
 
 ---
 
-## MongoDB Indexes
+## Indexes
 
-Three indexes support the service's required access patterns.
-
-### Account transactions by month
+The document store creates these indexes:
 
 ```text
 (account_last4 ASC, occurred_at DESC)
-```
-
-This supports retrieving one account's transactions for a month in newest-first
-order.
-
-### Account/category access
-
-```text
 (account_last4 ASC, category ASC)
-```
-
-This supports account-level category access and aggregation.
-
-### Message ID lookup
-
-```text
 (source_message_ids ASC)
 ```
 
-This supports finding the transaction produced by a particular source message.
-
----
-
-## Required Document Store Queries
-
-`DocumentStore` exposes three service queries.
+They correspond to the three access patterns required by `DocumentStore`.
 
 ### Query 1
 
 One account's transactions for one month, newest first.
 
+The compound account/time index lets MongoDB restrict the scan to the requested
+account and time range while also supporting newest-first ordering.
+
 ### Query 2
 
-Running totals per category for one account across its entire history.
+Running totals per category for one account across its full history.
 
-The totals are calculated using MongoDB aggregation.
+MongoDB first restricts the data to the account and then groups transactions by
+category.
 
 ### Query 3
 
-Given a source message ID, find the transaction it produced.
+Given a source message ID, find its transaction.
+
+The `source_message_ids` array is indexed for this lookup.
 
 ---
 
-## 100,000 Transaction Benchmark
+# 100,000 Transaction Benchmark
 
-A benchmark database was populated with:
+I populated a separate benchmark database with 100,000 generated transactions
+and used MongoDB:
 
 ```text
-100,000 transactions
+executionStats
 ```
 
-MongoDB `executionStats` was used to measure:
+to measure:
 
 ```text
 totalDocsExamined
 nReturned
 ```
 
-The measured results were:
+The final measurements were:
 
-| Query | Documents Examined | Results Returned |
+| Query | Examined | Returned |
 |---|---:|---:|
-| Account transactions for one month | 45 | 45 |
-| Category totals for one account | 100 | 4 |
-| Transaction lookup by message ID | 1 | 1 |
+| Account transactions for one month, newest first | 45 | 45 |
+| Category totals for one account across its history | 100 | 4 |
+| Transaction lookup by source message ID | 1 | 1 |
 
-The first query therefore examines only the documents needed for the requested
-account/month rather than scanning the 100,000-document collection.
+These are the requested six numbers:
 
-The category aggregation examines the 100 transactions belonging to the target
-account and returns four category totals.
+```text
+45 / 45
+100 / 4
+1 / 1
+```
 
-Message-ID lookup examines one document and returns one document.
+The collection contained 100,000 transactions during the measurement.
+
+For the first query, MongoDB examined only the 45 documents it returned.
+
+For category totals it examined the 100 transactions belonging to the requested
+account and produced four grouped category results.
+
+For message-ID lookup it examined and returned one document.
 
 The benchmark can be reproduced with:
 
@@ -572,296 +622,205 @@ The benchmark can be reproduced with:
 ./gradlew benchmark
 ```
 
-The benchmark uses a separate MongoDB database from the application data.
+---
+
+# SQL to MongoDB Backfill
+
+The existing SQL ledger cannot be assumed to be clean.
+
+The backfill therefore:
+
+```text
+read SQL rows
+    |
+    v
+group by canonical transaction identity
+    |
+    v
+merge source message IDs
+    |
+    v
+upsert deterministic Mongo document
+```
+
+This handles historical SQL duplicates and makes migration retries safe.
+
+If migration stops after writing part of the ledger, rerunning it writes the
+same deterministic documents again instead of creating duplicates.
 
 ---
 
-## SQL to MongoDB Backfill
+# Consistency Checking
 
-`Backfill` migrates existing SQL ledger transactions into MongoDB.
+The consistency checker does more than compare the number of rows/documents.
 
-The SQL ledger may contain historical duplicate rows, so the backfill first
-groups transactions using canonical transaction identity.
-
-If duplicate SQL rows represent the same transaction, their source message IDs
-are merged.
-
-The resulting transaction is then written using deterministic MongoDB identity.
-
-This makes the migration rerunnable.
-
-Running the backfill again produces the same logical document-store state
-instead of creating another copy of every transaction.
-
-The same behavior also allows the migration to recover safely after a partial
-failure: successfully written transactions can be written again without
-creating duplicates.
-
----
-
-## Consistency Checker
-
-The consistency checker verifies that SQL and MongoDB represent the same
-transactions.
-
-It does not simply compare row counts.
-
-For source transactions it uses source message IDs to locate the corresponding
-document and compares fields including:
+For every SQL transaction it uses the source message evidence to find the
+corresponding document and checks:
 
 ```text
 account
-transaction instant
+time
 direction
 amount
 category
 merchant
 ```
 
-When a value differs, the checker reports the transaction and the field that
-does not match.
+It also checks account/month results for unexpected documents, and the MongoDB
+implementation performs an additional full-store check for extra documents.
 
-It also checks for transactions present in the MongoDB store that do not have a
-corresponding SQL transaction.
-
-Tests deliberately modify document-store data and verify that the checker
-detects the alteration.
+The test suite includes cases where MongoDB data is deliberately changed so the
+checker must report the altered field rather than simply reporting a count
+difference.
 
 ---
 
-# Decision Log
+# AI Disclosure
 
-## 1. Use BigDecimal for Money
+I used **ChatGPT** while working on this assignment.
 
-All financial values use `BigDecimal`.
+I used it mainly for:
 
-Binary floating-point types such as `double` are avoided because financial
-calculations require exact decimal arithmetic.
+- discussing implementation alternatives
+- debugging failing tests
+- reviewing small pieces of Java code
+- suggesting edge cases to test
+- understanding MongoDB `explain()` output
+- reviewing documentation
 
----
+I did not treat generated code as correct without running it against the tests
+and corpus.
 
-## 2. Deduplicate Transactions, Not Messages
+## A case where the AI was wrong
 
-Message ID cannot be used as transaction identity because one transaction can
-produce several bank messages.
+While implementing reconciliation, an AI suggestion effectively returned the
+result from inside the account-processing loop.
 
-Transaction identity therefore uses account, time, direction, amount and
-merchant information.
+The problematic structure was:
 
----
+```java
+for (String account : accounts) {
+    // calculate discrepancies for this account
 
-## 3. Compare Transaction Times by Instant
-
-Two timestamps with different timezone offsets may describe exactly the same
-moment.
-
-Transaction identity therefore compares the underlying instant rather than the
-text representation of the offset.
-
-This was necessary to correctly deduplicate the SMS/email representation of the
-₹412.67 UBER transaction.
-
----
-
-## 4. Preserve Source Evidence
-
-Deduplication must not remove traceability.
-
-When several messages describe the same transaction, their source message IDs
-are combined into the single normalized transaction.
-
----
-
-## 5. Detect Internal Transfers from Both Legs
-
-Equal opposite-direction movements between the user's own accounts within the
-matching time window are classified as `TRANSFER`.
-
-This prevents internal money movement from being counted as spending or income.
-
----
-
-## 6. Separate MICRO from SPEND
-
-UPI debit transactions of ₹100 or less are classified as `MICRO`.
-
-They contribute to `micro_count` and `micro_total` rather than ordinary spend.
-
----
-
-## 7. Do Not Treat Credit-Card Available Limit as Balance
-
-Messages can contain values such as:
-
-```text
-Avl Limit
+    return document;
+}
 ```
 
-for a credit card.
+That meant reconciliation stopped after the first account.
 
-An available credit limit is not an account balance and therefore is not used
-as reconciliation evidence.
+The self-check output made the problem visible because reconciliation was not
+processing all accounts.
 
-Treating it as a balance produced false reconciliation discrepancies, so only
-actual supported balance fields are collected.
+I changed it to:
 
----
+```java
+for (String account : accounts) {
+    // calculate discrepancies for this account
+}
 
-## 8. Never Manufacture Reconciliation Transactions
+return document;
+```
 
-When balance evidence contains a movement that cannot be explained by a corpus
-transaction, the difference is reported.
+The difference is small in code but important in behavior: the first version
+can only reconcile one account, while the final version finishes processing all
+accounts before returning the report.
 
-The ₹7,500 discrepancy on account `4821` is therefore kept in
-`reconciliation.json` rather than being turned into a fake debit.
+I reran the self-check after the change rather than assuming the generated
+control flow was correct.
 
----
+## Another AI mistake I caught during benchmarking
 
-## 9. Use MongoDB for the Document Store
+The first benchmark generator suggested during AI-assisted development created
+amounts using:
 
-MongoDB provides the required document model, indexes, aggregation, upserts and
-execution statistics while remaining simple to run locally through Docker
-Compose.
+```java
+new BigDecimal((i % 5000) + ".00")
+```
 
----
-
-## 10. Make Migration Rerunnable
-
-MongoDB document identity is deterministic and the backfill deduplicates dirty
-SQL rows before writing.
-
-As a result, retries and overlapping migration runs converge on the same
-logical state.
-
----
-
-# AI Usage
-
-AI tools were used during implementation for:
-
-- discussing implementation approaches
-- debugging assistance
-- reviewing code
-- generating test ideas
-- investigating edge cases
-- improving documentation
-
-AI-generated suggestions were treated as suggestions rather than assumed to be
-correct. Changes were verified through automated tests, self-check output and
-direct inspection of the supplied corpus.
-
-### Example of an incorrect AI-generated implementation
-
-During reconciliation work, an AI-generated version placed a return statement
-inside the account-processing loop.
-
-That caused reconciliation to stop after processing the first account.
-
-Running the self-check exposed the incomplete reconciliation result. The
-control flow was corrected so that all accounts were processed before the
-reconciliation document was returned.
-
-### Benchmark validation
-
-AI assistance was also used while creating the 100,000-transaction benchmark.
-
-The initial benchmark generator allowed:
+For `i = 0`, that generated:
 
 ```text
 0.00
 ```
 
-as an amount.
+which violates the frozen `NormalizedTxn` contract requiring a positive amount.
 
-`NormalizedTxn` correctly rejected this because transaction amounts must be
-positive.
+The benchmark failed immediately.
 
-The benchmark failed immediately, the generated data was corrected to start at
-`1.00`, and only successful measurements were recorded.
+I changed it to:
 
-The benchmark's initial category generator also correlated account number and
-category, causing each benchmark account to receive only one category. The
-generator was corrected so each account receives transactions across all four
-categories before the final benchmark numbers were recorded.
+```java
+new BigDecimal((i % 5000 + 1) + ".00")
+```
+
+before recording any benchmark results.
+
+The initial category generator also accidentally tied category selection to the
+same modulo pattern as account selection. That meant an account repeatedly
+received only one category.
+
+I changed category generation so transactions for the same account cycle across
+the four categories, then cleared the benchmark collection and reran all
+100,000 transactions before recording the final six numbers.
 
 ---
 
-# Verification
+# What's Unfinished
 
-The primary verification command is:
+There are two data questions I cannot resolve from the supplied corpus alone.
 
-```bash
-./verify.sh
-```
+### 1. Checkpoint says 257 while I produce 256
 
-It starts MongoDB and runs:
+The remaining difference is the ₹412.67 UBER transaction represented through
+SMS and email.
+
+The two messages use different timezone offsets but resolve to the same instant
+and describe the same transaction.
+
+I therefore keep one transaction with multiple source message IDs.
+
+I have not added a special case to force the count to 257.
+
+### 2. Account 4821 has an unexplained ₹7,500 movement
+
+The balance evidence shows the difference, but I cannot find a corresponding
+transaction in the corpus.
+
+I report it as:
 
 ```text
-automated tests
-ledger self-check
+unexplained debit
 ```
 
-The current self-check result is:
+rather than inventing a ledger entry.
 
-```text
-INGEST
-  messages read          522
-  transactions written   256
-  messages skipped        43
+With more time, the next thing I would request is additional bank evidence
+around 2026-07-29.
 
-BY CATEGORY
-  SPEND        142567.64
-  INCOME       142791.16
-  MICRO          4443.85
-  TRANSFER      62000.00
+### 3. Transfer matching is heuristic
 
-AGAINST fixtures/corpus-a-totals.json
-  transactions expected 257, produced 256
+Transfer detection currently relies on the evidence available in the messages:
+account pair, opposite direction, amount, merchant information, and timing.
 
-  4821:
-    transactions 145 (expected 146)
-    ledger balance 48626.34
-    bank balance   41126.34
-    difference      7500.00
+That works for the supplied corpus, but with more time I would validate the
+matching rules against a larger bank/message dataset and make the matching
+window configurable.
 
-  9075:
-    transactions 91 (expected 91)
-    ledger balance 51210.63
-    bank balance   51210.63
-    difference         0.00
-```
-
-The checkpoint difference is intentionally visible.
+I would rather document this limitation than claim that a heuristic derived
+from one corpus is universally correct.
 
 ---
 
-# Known Discrepancy / Unfinished Data Issue
-
-The supplied checkpoint expects 257 transactions while the implementation
-produces 256 unique transactions.
-
-The evidence in the corpus supports treating the SMS and email representation
-of the ₹412.67 UBER transaction as the same real transaction.
-
-Account `4821` additionally contains an unexplained ₹7,500 balance movement.
-
-Both differences are reported rather than hidden.
-
-No synthetic transaction or balancing adjustment is introduced simply to make
-the checkpoint match.
-
----
-
-# Important Project Files
+# Important Files
 
 ```text
 src/main/java/in/simplifymoney/ledgersync/
-  ingest/       ingestion and transaction processing
-  json/         JSON reading/writing
-  model/        normalized domain model
-  parse/        bank SMS/email parsers
-  report/       summary and reconciliation generation
-  store/        SQL store, MongoDB store, backfill and consistency checking
+  ingest/       ingestion and deduplication
+  json/         JSON parsing/writing
+  model/        transaction domain model
+  parse/        SMS/email parsers
+  report/       ledger, summary and reconciliation
+  store/        SQL store, MongoDB store, backfill and consistency checker
   App.java
   SelfCheck.java
   Benchmark.java
@@ -882,7 +841,7 @@ verify.sh
 
 # Frozen Contract
 
-The following supplied contract files were not modified:
+The supplied frozen contract was kept intact:
 
 ```text
 model/NormalizedTxn.java
@@ -890,5 +849,5 @@ model/Category.java
 NormalizedTxnContractTest.java
 ```
 
-The implementation works behind these contracts rather than changing them to
-make the data fit.
+The implementation was changed behind the contract rather than changing the
+contract to make the corpus results fit.
