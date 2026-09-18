@@ -134,6 +134,12 @@ public final class MongoDocumentStore implements DocumentStore, AutoCloseable {
         );
     }
 
+    public List<NormalizedTxn> all() {
+        List<NormalizedTxn> out = new ArrayList<>();
+        collection.find().forEach(d -> out.add(toTxn(d)));
+        return out;
+    }
+
     @Override
     public void close() {
         client.close();

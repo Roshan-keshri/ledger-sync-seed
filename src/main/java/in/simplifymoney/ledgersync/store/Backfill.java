@@ -16,29 +16,45 @@ public final class Backfill {
     }
 
     public Result run() {
+        var unique = new java.util.LinkedHashMap<String, NormalizedTxn>();
         long read = 0;
-        long written = 0;
         long skipped = 0;
-
-        Set<String> seen = new HashSet<>();
 
         for (NormalizedTxn txn : source.all()) {
             read++;
 
             String key = key(txn);
 
-            if (!seen.add(key)) {
+            if (unique.containsKey(key)) {
+                NormalizedTxn old = unique.get(key);
+
+                var ids = new java.util.ArrayList<>(old.sourceMessageIds());
+                for (String id : txn.sourceMessageIds()) {
+                    if (!ids.contains(id)) {
+                        ids.add(id);
+                    }
+                }
+
+                txn = new NormalizedTxn(
+                        old.accountLast4(),
+                        old.occurredAt(),
+                        old.direction(),
+                        old.amount(),
+                        old.category(),
+                        old.merchant(),
+                        ids
+                );
+
                 skipped++;
-                continue;
             }
 
-            target.save(txn);
-            written++;
+            unique.put(key, txn);
         }
 
-        return new Result(read, written, skipped);
-    }
+        unique.values().forEach(target::save);
 
+        return new Result(read, unique.size(), skipped);
+    }
     private String key(NormalizedTxn t) {
         return t.accountLast4() + "|"
                 + t.occurredAt().toInstant() + "|"
