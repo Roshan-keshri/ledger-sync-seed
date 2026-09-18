@@ -27,9 +27,13 @@ public final class MongoDocumentStore implements DocumentStore, AutoCloseable {
     private final MongoCollection<Document> collection;
 
     public MongoDocumentStore(String uri) {
+        this(uri, "ledger_sync");
+    }
+
+    public MongoDocumentStore(String uri, String database) {
         client = MongoClients.create(uri);
 
-        MongoDatabase db = client.getDatabase("ledger_sync");
+        MongoDatabase db = client.getDatabase(database);
         collection = db.getCollection("transactions");
 
         collection.createIndex(Indexes.compoundIndex(

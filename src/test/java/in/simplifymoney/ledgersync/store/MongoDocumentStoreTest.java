@@ -17,7 +17,10 @@ class MongoDocumentStoreTest {
     @Test
     void supportsRequiredQueries() {
         try (MongoDocumentStore store =
-                     new MongoDocumentStore("mongodb://localhost:27017")) {
+                     new MongoDocumentStore(
+                             "mongodb://localhost:27017",
+                             "document_store_test"
+                     )) {
 
             NormalizedTxn txn = new NormalizedTxn(
                     "9999",
