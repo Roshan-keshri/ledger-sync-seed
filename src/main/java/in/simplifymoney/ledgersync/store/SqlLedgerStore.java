@@ -79,10 +79,24 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
 
     @Override
     public void save(NormalizedTxn t) {
+        for (NormalizedTxn existing : all()) {
+            boolean same = existing.accountLast4().equals(t.accountLast4())
+                    && existing.occurredAt().toInstant().equals(t.occurredAt().toInstant())
+                    && existing.direction() == t.direction()
+                    && existing.amount().compareTo(t.amount()) == 0
+                    && existing.merchant().equals(t.merchant());
+
+            if (same) {
+                mergeSourceIds(existing, t);
+                return;
+            }
+        }
+
         try (PreparedStatement ps = conn.prepareStatement(
                 "INSERT INTO ledger(account_last4, occurred_at, direction, amount,"
                         + " category, merchant, source_message_ids)"
                         + " VALUES (?,?,?,?,?,?,?)")) {
+
             ps.setString(1, t.accountLast4());
             ps.setString(2, t.occurredAt().toString());
             ps.setString(3, t.direction().name());
@@ -91,8 +105,33 @@ public final class SqlLedgerStore implements LedgerStore, AutoCloseable {
             ps.setString(6, t.merchant());
             ps.setString(7, String.join(",", t.sourceMessageIds()));
             ps.executeUpdate();
+
         } catch (SQLException e) {
             throw new IllegalStateException("could not save " + t, e);
+        }
+    }
+
+    private void mergeSourceIds(NormalizedTxn old, NormalizedTxn incoming) {
+        List<String> ids = new ArrayList<>(old.sourceMessageIds());
+
+        for (String id : incoming.sourceMessageIds())
+            if (!ids.contains(id)) ids.add(id);
+
+        try (PreparedStatement ps = conn.prepareStatement(
+                "UPDATE ledger SET source_message_ids = ?"
+                        + " WHERE account_last4 = ? AND occurred_at = ?"
+                        + " AND direction = ? AND amount = ? AND merchant = ?")) {
+
+            ps.setString(1, String.join(",", ids));
+            ps.setString(2, old.accountLast4());
+            ps.setString(3, old.occurredAt().toString());
+            ps.setString(4, old.direction().name());
+            ps.setBigDecimal(5, old.amount());
+            ps.setString(6, old.merchant());
+            ps.executeUpdate();
+
+        } catch (SQLException e) {
+            throw new IllegalStateException("could not merge source ids", e);
         }
     }
 
