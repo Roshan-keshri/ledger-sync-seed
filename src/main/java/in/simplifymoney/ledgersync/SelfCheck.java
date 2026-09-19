@@ -71,7 +71,6 @@ public final class SelfCheck {
                     running.toPlainString(), closing.toPlainString(),
                     running.subtract(closing).toPlainString());
         }
-        System.out.println("\nThis is the starting point, not the finish line.");
     }
 
 }
