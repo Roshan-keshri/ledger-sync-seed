@@ -22,6 +22,8 @@ class MongoDocumentStoreTest {
                              "document_store_test"
                      )) {
 
+            store.collection().deleteMany(new org.bson.Document());
+
             NormalizedTxn txn = new NormalizedTxn(
                     "9999",
                     OffsetDateTime.parse("2026-07-10T10:00:00+05:30"),
@@ -32,8 +34,18 @@ class MongoDocumentStoreTest {
                     List.of("test-message-1")
             );
 
+            NormalizedTxn sameTxn = new NormalizedTxn(
+                    "9999",
+                    OffsetDateTime.parse("2026-07-10T10:00:00+05:30"),
+                    Direction.DEBIT,
+                    new BigDecimal("100.0"),
+                    Category.SPEND,
+                    "TEST MERCHANT",
+                    List.of("test-message-2")
+            );
+
             store.save(txn);
-            store.save(txn);
+            store.save(sameTxn);
 
             assertEquals(1,
                     store.forAccountMonth("9999", YearMonth.of(2026, 7)).size());
@@ -42,6 +54,7 @@ class MongoDocumentStoreTest {
                     store.categoryTotals("9999").get(Category.SPEND));
 
             assertTrue(store.byMessageId("test-message-1").isPresent());
+            assertTrue(store.byMessageId("test-message-2").isPresent());
         }
     }
 }

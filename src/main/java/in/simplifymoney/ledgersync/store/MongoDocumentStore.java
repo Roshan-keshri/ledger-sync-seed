@@ -2,6 +2,8 @@ package in.simplifymoney.ledgersync.store;
 
 import com.mongodb.client.MongoClient;
 import com.mongodb.client.MongoClients;
+import com.mongodb.client.model.UpdateOptions;
+import com.mongodb.client.model.Updates;
 import com.mongodb.client.MongoCollection;
 import com.mongodb.client.MongoDatabase;
 import com.mongodb.client.model.Indexes;
@@ -49,19 +51,19 @@ public final class MongoDocumentStore implements DocumentStore, AutoCloseable {
 
     @Override
     public void save(NormalizedTxn t) {
-        Document doc = new Document("_id", id(t))
-                .append("account_last4", t.accountLast4())
-                .append("occurred_at", t.occurredAt().toInstant().toString())
-                .append("direction", t.direction().name())
-                .append("amount", t.amount().toPlainString())
-                .append("category", t.category().name())
-                .append("merchant", t.merchant())
-                .append("source_message_ids", t.sourceMessageIds());
-
-        collection.replaceOne(
-                new Document("_id", id(t)),
-                doc,
-                new ReplaceOptions().upsert(true));
+        collection.updateOne(
+                Filters.eq("_id", id(t)),
+                Updates.combine(
+                        Updates.set("account_last4", t.accountLast4()),
+                        Updates.set("occurred_at", t.occurredAt().toInstant().toString()),
+                        Updates.set("direction", t.direction().name()),
+                        Updates.set("amount", t.amount().toPlainString()),
+                        Updates.set("category", t.category().name()),
+                        Updates.set("merchant", t.merchant()),
+                        Updates.addEachToSet("source_message_ids", t.sourceMessageIds())
+                ),
+                new UpdateOptions().upsert(true)
+        );
     }
 
     private String id(NormalizedTxn t) {
